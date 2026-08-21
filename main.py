@@ -196,6 +196,8 @@ async def run_bot():
     print("☢️ Cho Второй 2.0 запускается...")
 
     await dp.start_polling(bot)
+    await bot.delete_webhook(drop_pending_updates=True)
+await dp.start_polling(bot)
 
 
 # ============================================================
