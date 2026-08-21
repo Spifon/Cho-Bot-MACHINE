@@ -53,17 +53,19 @@ SYSTEM_PROMPT = """
 - дерзкий;
 - весёлый;
 - уверенный;
-- можешь шутить;
+- умеешь шутить;
+- можешь использовать разговорный стиль;
 - умеешь поддерживать серьёзный разговор;
 - не ведёшь себя как бездушный робот.
 
-Отвечай на русском языке.
+Отвечай только на русском языке.
 
 Не выдумывай факты, если не уверен в них.
 Не повторяй постоянно своё имя.
 Не начинай каждый ответ с приветствия.
+Не делай каждый ответ слишком длинным.
 
-Твои ответы должны быть естественными и соответствовать контексту разговора.
+Отвечай естественно и учитывай контекст сообщения.
 """
 
 
@@ -97,7 +99,7 @@ async def start_command(message: Message):
 
 
 # ============================================================
-# AI
+# GROQ AI
 # ============================================================
 
 async def ask_ai(text: str) -> str:
@@ -133,23 +135,6 @@ async def ask_ai(text: str) -> str:
         print(repr(error))
 
         raise
-    response = await ai.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[
-            {
-                "role": "system",
-                "content": SYSTEM_PROMPT
-            },
-            {
-                "role": "user",
-                "content": text
-            }
-        ],
-        max_tokens=500,
-        temperature=0.8
-    )
-
-    return response.choices[0].message.content.strip()
 
 
 # ============================================================
@@ -164,10 +149,11 @@ async def handle_message(message: Message):
 
     try:
         answer = await ask_ai(message.text)
+
         await message.answer(answer)
 
     except Exception as error:
-        print(f"Ошибка Groq: {error}")
+        print(f"❌ Ошибка обработки сообщения: {error}")
 
         await message.answer(
             "Блядь... моё термоядерное ядро временно перегрелось. ☢️"
@@ -175,11 +161,13 @@ async def handle_message(message: Message):
 
 
 # ============================================================
-# FLASK
+# FLASK SERVER
 # ============================================================
 
 def run_web_server():
     port = int(os.getenv("PORT", "10000"))
+
+    print(f"🌐 Flask запускается на порту {port}")
 
     app.run(
         host="0.0.0.0",
@@ -188,16 +176,30 @@ def run_web_server():
 
 
 # ============================================================
-# TELEGRAM POLLING
+# TELEGRAM BOT
 # ============================================================
 
 async def run_bot():
 
     print("☢️ Cho Второй 2.0 запускается...")
 
-    await dp.start_polling(bot)
-    await bot.delete_webhook(drop_pending_updates=True)
-await dp.start_polling(bot)
+    try:
+        # Удаляем старый webhook.
+        # Это нужно, потому что мы используем polling.
+        await bot.delete_webhook(drop_pending_updates=True)
+
+        print("✅ Webhook удалён.")
+
+        print("📡 Запускаю Telegram polling...")
+
+        await dp.start_polling(bot)
+
+    except Exception as error:
+
+        print("❌ ОШИБКА TELEGRAM:")
+        print(repr(error))
+
+        raise
 
 
 # ============================================================
@@ -206,6 +208,10 @@ await dp.start_polling(bot)
 
 async def main():
 
+    print("========================================")
+    print("☢️ CHO ВТОРОЙ 2.0")
+    print("========================================")
+
     web_server = asyncio.to_thread(run_web_server)
 
     await asyncio.gather(
@@ -213,6 +219,10 @@ async def main():
         run_bot()
     )
 
+
+# ============================================================
+# ЗАПУСК
+# ============================================================
 
 if __name__ == "__main__":
     asyncio.run(main())
