@@ -101,6 +101,38 @@ async def start_command(message: Message):
 # ============================================================
 
 async def ask_ai(text: str) -> str:
+    print("☢️ Отправляю запрос в Groq...")
+    print(f"💬 Сообщение: {text}")
+
+    try:
+        response = await ai.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {
+                    "role": "system",
+                    "content": SYSTEM_PROMPT
+                },
+                {
+                    "role": "user",
+                    "content": text
+                }
+            ],
+            max_tokens=500,
+            temperature=0.8
+        )
+
+        answer = response.choices[0].message.content
+
+        print("✅ Groq ответил!")
+        print(f"🤖 Ответ: {answer}")
+
+        return answer.strip()
+
+    except Exception as error:
+        print("❌ ОШИБКА GROQ:")
+        print(repr(error))
+
+        raise
     response = await ai.chat.completions.create(
         model="llama-3.1-8b-instant",
         messages=[
