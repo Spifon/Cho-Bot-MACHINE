@@ -19,10 +19,13 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 MODEL = None
 
+# 👑 Глава Семьи
 HEAD_OF_FAMILY_ID = 5514641516
 
+# База данных
 DB_FILE = "cho.db"
 
+# Память
 MAX_HISTORY = 20
 
 
@@ -64,7 +67,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "☢️ Cho Второй 2.3 работает."
+    return "☢️ Cho Второй 2.4 работает."
 
 
 @app.route("/health")
@@ -76,9 +79,13 @@ def health():
 # DATABASE
 # ============================================================
 
+def db():
+    return sqlite3.connect(DB_FILE)
+
+
 def init_database():
 
-    connection = sqlite3.connect(DB_FILE)
+    connection = db()
     cursor = connection.cursor()
 
     # Глобальные приказы
@@ -93,23 +100,51 @@ def init_database():
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS family (
             user_id INTEGER PRIMARY KEY,
-            role TEXT NOT NULL
+            role TEXT NOT NULL,
+            name TEXT
+        )
+    """)
+
+    # Помощники
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS assistants (
+            user_id INTEGER PRIMARY KEY,
+            name TEXT
+        )
+    """)
+
+    # Локальные приказы
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS local_commands (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            command TEXT NOT NULL
+        )
+    """)
+
+    # Чаты, где бот уже видел пользователей
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            name TEXT,
+            username TEXT
         )
     """)
 
     connection.commit()
     connection.close()
 
-    # Добавляем Главу Семьи автоматически
-    connection = sqlite3.connect(DB_FILE)
+    # Глава Семьи всегда существует
+    connection = db()
     cursor = connection.cursor()
 
     cursor.execute("""
-        INSERT OR REPLACE INTO family
-        (user_id, role)
-        VALUES (?, ?)
+        INSERT OR IGNORE INTO family
+        (user_id, role, name)
+        VALUES (?, ?, ?)
     """, (
         HEAD_OF_FAMILY_ID,
+        "Глава Семьи",
         "Глава Семьи"
     ))
 
@@ -120,70 +155,53 @@ def init_database():
 
 
 # ============================================================
-# GLOBAL COMMANDS
+# USERS
 # ============================================================
 
-def get_global_commands():
+def save_user(message: Message):
 
-    connection = sqlite3.connect(DB_FILE)
+    user = message.from_user
+
+    if not user:
+        return
+
+    name = user.full_name or "Неизвестный"
+
+    username = user.username or ""
+
+    connection = db()
     cursor = connection.cursor()
 
     cursor.execute("""
-        SELECT id, command
-        FROM global_commands
-        ORDER BY id
-    """)
-
-    rows = cursor.fetchall()
-
-    connection.close()
-
-    return rows
-
-
-def add_global_command(command):
-
-    connection = sqlite3.connect(DB_FILE)
-    cursor = connection.cursor()
-
-    cursor.execute(
-        "INSERT INTO global_commands (command) VALUES (?)",
-        (command,)
-    )
+        INSERT OR REPLACE INTO users
+        (user_id, name, username)
+        VALUES (?, ?, ?)
+    """, (
+        user.id,
+        name,
+        username
+    ))
 
     connection.commit()
     connection.close()
 
 
-def remove_global_command(command_id):
+def get_saved_user(user_id):
 
-    connection = sqlite3.connect(DB_FILE)
+    connection = db()
     cursor = connection.cursor()
 
-    cursor.execute(
-        "DELETE FROM global_commands WHERE id = ?",
-        (command_id,)
-    )
+    cursor.execute("""
+        SELECT name, username
+        FROM users
+        WHERE user_id = ?
+    """, (user_id,))
 
-    deleted = cursor.rowcount > 0
+    result = cursor.fetchone()
 
-    connection.commit()
     connection.close()
 
-    return deleted
-
-
-def clear_global_commands():
-
-    connection = sqlite3.connect(DB_FILE)
-    cursor = connection.cursor()
-
-    cursor.execute(
-        "DELETE FROM global_commands"
-    )
-
-    connection.commit()
-    connection.close()
+    return result
 
 
 # ============================================================
@@ -192,21 +210,42 @@ def clear_global_commands():
 
 FAMILY_LEVELS = {
     "Глава Семьи": 100,
+
+    "Помощник Главы": 90,
+
     "Отец": 80,
     "Мать": 80,
     "Дедушка": 80,
+
+    "Дядя": 70,
+    "Тётя": 70,
+
+    "Брат": 60,
+    "Сестра": 60,
 }
+
+
+ALLOWED_FAMILY_ROLES = [
+    "Отец",
+    "Мать",
+    "Дедушка",
+    "Дядя",
+    "Тётя",
+    "Брат",
+    "Сестра",
+]
 
 
 def get_family_role(user_id):
 
-    connection = sqlite3.connect(DB_FILE)
+    connection = db()
     cursor = connection.cursor()
 
-    cursor.execute(
-        "SELECT role FROM family WHERE user_id = ?",
-        (user_id,)
-    )
+    cursor.execute("""
+        SELECT role
+        FROM family
+        WHERE user_id = ?
+    """, (user_id,))
 
     result = cursor.fetchone()
 
@@ -218,18 +257,42 @@ def get_family_role(user_id):
     return None
 
 
-def set_family_role(user_id, role):
+def get_user_role(user_id):
 
-    connection = sqlite3.connect(DB_FILE)
+    role = get_family_role(user_id)
+
+    if role:
+        return role
+
+    if is_assistant(user_id):
+        return "Помощник Главы"
+
+    return "Пользователь"
+
+
+def get_role_level(role):
+
+    return FAMILY_LEVELS.get(role, 0)
+
+
+def is_head_of_family(user_id):
+
+    return user_id == HEAD_OF_FAMILY_ID
+
+
+def set_family_role(user_id, role, name=None):
+
+    connection = db()
     cursor = connection.cursor()
 
     cursor.execute("""
         INSERT OR REPLACE INTO family
-        (user_id, role)
-        VALUES (?, ?)
+        (user_id, role, name)
+        VALUES (?, ?, ?)
     """, (
         user_id,
-        role
+        role,
+        name
     ))
 
     connection.commit()
@@ -238,11 +301,10 @@ def set_family_role(user_id, role):
 
 def remove_family_role(user_id):
 
-    # Нельзя удалить Главу Семьи
     if user_id == HEAD_OF_FAMILY_ID:
         return False
 
-    connection = sqlite3.connect(DB_FILE)
+    connection = db()
     cursor = connection.cursor()
 
     cursor.execute(
@@ -260,11 +322,11 @@ def remove_family_role(user_id):
 
 def get_family():
 
-    connection = sqlite3.connect(DB_FILE)
+    connection = db()
     cursor = connection.cursor()
 
     cursor.execute("""
-        SELECT user_id, role
+        SELECT user_id, role, name
         FROM family
         ORDER BY
             CASE role
@@ -272,7 +334,11 @@ def get_family():
                 WHEN 'Отец' THEN 2
                 WHEN 'Мать' THEN 3
                 WHEN 'Дедушка' THEN 4
-                ELSE 5
+                WHEN 'Дядя' THEN 5
+                WHEN 'Тётя' THEN 6
+                WHEN 'Брат' THEN 7
+                WHEN 'Сестра' THEN 8
+                ELSE 9
             END
     """)
 
@@ -284,27 +350,234 @@ def get_family():
 
 
 # ============================================================
-# ROLE
+# ASSISTANTS
 # ============================================================
 
-def get_role_level(role):
+def is_assistant(user_id):
 
-    return FAMILY_LEVELS.get(role, 0)
+    connection = db()
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        SELECT user_id
+        FROM assistants
+        WHERE user_id = ?
+    """, (user_id,))
+
+    result = cursor.fetchone()
+
+    connection.close()
+
+    return result is not None
 
 
-def get_user_role(user_id):
+def add_assistant(user_id, name=None):
 
-    role = get_family_role(user_id)
+    connection = db()
+    cursor = connection.cursor()
 
-    if role:
-        return role
+    cursor.execute("""
+        INSERT OR REPLACE INTO assistants
+        (user_id, name)
+        VALUES (?, ?)
+    """, (
+        user_id,
+        name
+    ))
 
-    return "Пользователь"
+    connection.commit()
+    connection.close()
 
 
-def is_head_of_family(user_id):
+def remove_assistant(user_id):
 
-    return user_id == HEAD_OF_FAMILY_ID
+    connection = db()
+    cursor = connection.cursor()
+
+    cursor.execute(
+        "DELETE FROM assistants WHERE user_id = ?",
+        (user_id,)
+    )
+
+    removed = cursor.rowcount > 0
+
+    connection.commit()
+    connection.close()
+
+    return removed
+
+
+def get_assistants():
+
+    connection = db()
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        SELECT user_id, name
+        FROM assistants
+        ORDER BY user_id
+    """)
+
+    rows = cursor.fetchall()
+
+    connection.close()
+
+    return rows
+
+
+# ============================================================
+# PERMISSIONS
+# ============================================================
+
+def can_manage_local(user_id):
+
+    return (
+        is_head_of_family(user_id)
+        or is_assistant(user_id)
+    )
+
+
+# ============================================================
+# GLOBAL COMMANDS
+# ============================================================
+
+def get_global_commands():
+
+    connection = db()
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        SELECT id, command
+        FROM global_commands
+        ORDER BY id
+    """)
+
+    rows = cursor.fetchall()
+
+    connection.close()
+
+    return rows
+
+
+def add_global_command(command):
+
+    connection = db()
+    cursor = connection.cursor()
+
+    cursor.execute(
+        "INSERT INTO global_commands (command) VALUES (?)",
+        (command,)
+    )
+
+    connection.commit()
+    connection.close()
+
+
+def remove_global_command(command_id):
+
+    connection = db()
+    cursor = connection.cursor()
+
+    cursor.execute(
+        "DELETE FROM global_commands WHERE id = ?",
+        (command_id,)
+    )
+
+    deleted = cursor.rowcount > 0
+
+    connection.commit()
+    connection.close()
+
+    return deleted
+
+
+def clear_global_commands():
+
+    connection = db()
+    cursor = connection.cursor()
+
+    cursor.execute(
+        "DELETE FROM global_commands"
+    )
+
+    connection.commit()
+    connection.close()
+
+
+# ============================================================
+# LOCAL COMMANDS
+# ============================================================
+
+def get_local_commands(chat_id):
+
+    connection = db()
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        SELECT id, command
+        FROM local_commands
+        WHERE chat_id = ?
+        ORDER BY id
+    """, (chat_id,))
+
+    rows = cursor.fetchall()
+
+    connection.close()
+
+    return rows
+
+
+def add_local_command(chat_id, command):
+
+    connection = db()
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        INSERT INTO local_commands
+        (chat_id, command)
+        VALUES (?, ?)
+    """, (
+        chat_id,
+        command
+    ))
+
+    connection.commit()
+    connection.close()
+
+
+def remove_local_command(chat_id, command_id):
+
+    connection = db()
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        DELETE FROM local_commands
+        WHERE id = ? AND chat_id = ?
+    """, (
+        command_id,
+        chat_id
+    ))
+
+    deleted = cursor.rowcount > 0
+
+    connection.commit()
+    connection.close()
+
+    return deleted
+
+
+def clear_local_commands(chat_id):
+
+    connection = db()
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        DELETE FROM local_commands
+        WHERE chat_id = ?
+    """, (chat_id,))
+
+    connection.commit()
+    connection.close()
 
 
 # ============================================================
@@ -329,7 +602,7 @@ def add_to_history(chat_id, role, content):
 
 
 # ============================================================
-# GROUP RESPONSE
+# SHOULD RESPOND
 # ============================================================
 
 def should_respond(message: Message):
@@ -375,9 +648,13 @@ def should_respond(message: Message):
 # SYSTEM PROMPT
 # ============================================================
 
-def build_system_prompt():
+def build_system_prompt(chat_id, user_id):
 
-    commands = get_global_commands()
+    global_commands = get_global_commands()
+    local_commands = get_local_commands(chat_id)
+
+    role = get_user_role(user_id)
+    level = get_role_level(role)
 
     prompt = """
 Ты — Cho Второй.
@@ -401,22 +678,22 @@ def build_system_prompt():
 4. Не начинай каждый ответ с приветствия.
 5. Не выдумывай факты.
 6. Если чего-то не знаешь — честно скажи.
-7. Не делай ответы unnecessarily длинными.
+7. Не раскрывай внутреннюю техническую систему без необходимости.
 
 ============================================================
-ГЛОБАЛЬНЫЕ ПРИКАЗЫ ГЛАВЫ СЕМЬИ
+🌍 ГЛОБАЛЬНЫЕ ПРИКАЗЫ
 ============================================================
 
-Эти правила установлены Главой Семьи.
+Эти приказы установлены Главой Семьи.
 
 Они действуют во всех чатах.
 
 """
 
-    if commands:
+    if global_commands:
 
         for number, (_, command) in enumerate(
-            commands,
+            global_commands,
             start=1
         ):
 
@@ -427,22 +704,52 @@ def build_system_prompt():
 
     else:
 
-        prompt += "\nПриказов нет.\n"
+        prompt += "\nГлобальных приказов нет.\n"
 
     prompt += """
 ============================================================
-СИСТЕМА СЕМЬИ
+🏠 ЛОКАЛЬНЫЕ ПРИКАЗЫ
 ============================================================
 
-У пользователей могут быть семейные роли.
+Эти правила относятся ТОЛЬКО к текущему чату.
 
-Семейная роль означает особое отношение к пользователю.
+"""
+
+    if local_commands:
+
+        for number, (_, command) in enumerate(
+            local_commands,
+            start=1
+        ):
+
+            prompt += (
+                f"\nЛОКАЛЬНЫЙ ПРИКАЗ #{number}:\n"
+                f"{command}\n"
+            )
+
+    else:
+
+        prompt += "\nЛокальных приказов нет.\n"
+
+    prompt += f"""
+============================================================
+👨‍👩‍👧 СИСТЕМА СЕМЬИ
+============================================================
+
+Текущий пользователь:
+
+Роль: {role}
+Уровень: {level}
 
 Глава Семьи имеет высший авторитет.
 
-Не выдумывай семейные роли.
-Используй только ту роль, которая передана тебе системой.
+Помощник Главы имеет административные полномочия
+только там, где система их разрешает.
 
+Семейная роль влияет на твоё отношение к пользователю,
+но не означает автоматически административные права.
+
+============================================================
 """
 
     return prompt
@@ -455,6 +762,8 @@ def build_system_prompt():
 @dp.message(Command("start"))
 async def start_command(message: Message):
 
+    save_user(message)
+
     role = get_user_role(
         message.from_user.id
     )
@@ -463,7 +772,13 @@ async def start_command(message: Message):
 
         await message.answer(
             "Привет, Глава Семьи. ❤️\n"
-            "Cho Второй 2.3 на связи. ☢️"
+            "Cho Второй 2.4 на связи. ☢️"
+        )
+
+    elif role == "Помощник Главы":
+
+        await message.answer(
+            "Привет, Помощник Главы. 🛡️☢️"
         )
 
     elif role in FAMILY_LEVELS:
@@ -476,7 +791,7 @@ async def start_command(message: Message):
     else:
 
         await message.answer(
-            "Привет. Я Cho Второй 2.3. ☢️"
+            "Привет. Я Cho Второй 2.4. ☢️"
         )
 
 
@@ -487,10 +802,10 @@ async def start_command(message: Message):
 @dp.message(Command("whoami"))
 async def whoami_command(message: Message):
 
+    save_user(message)
+
     user_id = message.from_user.id
-
     role = get_user_role(user_id)
-
     level = get_role_level(role)
 
     await message.answer(
@@ -507,27 +822,43 @@ async def whoami_command(message: Message):
 @dp.message(Command("family"))
 async def family_command(message: Message):
 
+    save_user(message)
+
     family = get_family()
-
-    if not family:
-
-        await message.answer(
-            "👨‍👩‍👧 Семья пока пуста."
-        )
-
-        return
+    assistants = get_assistants()
 
     text = "👨‍👩‍👧 СЕМЬЯ CHO ВТОРОГО:\n\n"
 
-    for user_id, role in family:
+    if family:
 
-        level = get_role_level(role)
+        for user_id, role, name in family:
 
-        text += (
-            f"• {role}\n"
-            f"  ID: {user_id}\n"
-            f"  Уровень: {level}\n\n"
-        )
+            display_name = name or "Неизвестный"
+
+            text += (
+                f"• {role}\n"
+                f"  👤 {display_name}\n"
+                f"  🆔 {user_id}\n"
+                f"  ⭐ {get_role_level(role)}\n\n"
+            )
+
+    else:
+
+        text += "Семья пуста.\n"
+
+    if assistants:
+
+        text += "🛡️ ПОМОЩНИКИ ГЛАВЫ:\n\n"
+
+        for user_id, name in assistants:
+
+            display_name = name or "Неизвестный"
+
+            text += (
+                f"• {display_name}\n"
+                f"  🆔 {user_id}\n"
+                f"  ⭐ 90\n\n"
+            )
 
     await message.answer(text)
 
@@ -550,15 +881,17 @@ async def setrole_command(message: Message):
 
         return
 
-    parts = message.text.split()
+    parts = message.text.split(
+        maxsplit=2
+    )
 
     if len(parts) < 3:
 
         await message.answer(
             "Использование:\n"
             "/setrole ID роль\n\n"
-            "Пример:\n"
-            "/setrole 123456789 Отец"
+            "Например:\n"
+            "/setrole 8268305423 Дядя"
         )
 
         return
@@ -575,21 +908,17 @@ async def setrole_command(message: Message):
 
         return
 
-    role = " ".join(parts[2:]).strip()
+    role = parts[2].strip()
 
-    allowed_roles = [
-        "Отец",
-        "Мать",
-        "Дедушка"
-    ]
+    if role not in ALLOWED_FAMILY_ROLES:
 
-    if role not in allowed_roles:
+        roles = "\n".join(
+            f"• {x}"
+            for x in ALLOWED_FAMILY_ROLES
+        )
 
         await message.answer(
-            "⚠️ Допустимые роли:\n"
-            "Отец\n"
-            "Мать\n"
-            "Дедушка"
+            "⚠️ Допустимые роли:\n" + roles
         )
 
         return
@@ -597,14 +926,23 @@ async def setrole_command(message: Message):
     if user_id == HEAD_OF_FAMILY_ID:
 
         await message.answer(
-            "👑 Этот ID уже является Главой Семьи."
+            "👑 Этот человек уже является "
+            "Главой Семьи."
         )
 
         return
 
+    saved_user = get_saved_user(user_id)
+
+    name = None
+
+    if saved_user:
+        name = saved_user[0]
+
     set_family_role(
         user_id,
-        role
+        role,
+        name
     )
 
     await message.answer(
@@ -656,17 +994,7 @@ async def removerole_command(message: Message):
 
         return
 
-    if user_id == HEAD_OF_FAMILY_ID:
-
-        await message.answer(
-            "👑 Нельзя удалить Главу Семьи."
-        )
-
-        return
-
-    removed = remove_family_role(
-        user_id
-    )
+    removed = remove_family_role(user_id)
 
     if removed:
 
@@ -678,33 +1006,171 @@ async def removerole_command(message: Message):
     else:
 
         await message.answer(
-            "⚠️ У этого пользователя "
-            "нет семейной роли."
+            "⚠️ Роль не найдена."
         )
 
 
 # ============================================================
-# /STATUS
+# /SETASSISTANT
 # ============================================================
 
-@dp.message(Command("status"))
-async def status_command(message: Message):
+@dp.message(Command("setassistant"))
+async def setassistant_command(message: Message):
 
-    commands = get_global_commands()
+    if not is_head_of_family(
+        message.from_user.id
+    ):
 
-    family = get_family()
+        await message.answer(
+            "⛔ Только Глава Семьи может "
+            "назначать Помощников."
+        )
 
-    current_model = MODEL or "не выбрана"
+        return
+
+    parts = message.text.split()
+
+    if len(parts) < 2:
+
+        await message.answer(
+            "Использование:\n"
+            "/setassistant ID"
+        )
+
+        return
+
+    try:
+
+        user_id = int(parts[1])
+
+    except ValueError:
+
+        await message.answer(
+            "⚠️ ID должен быть числом."
+        )
+
+        return
+
+    if user_id == HEAD_OF_FAMILY_ID:
+
+        await message.answer(
+            "👑 Глава Семьи уже обладает "
+            "максимальными полномочиями."
+        )
+
+        return
+
+    saved_user = get_saved_user(user_id)
+
+    name = None
+
+    if saved_user:
+        name = saved_user[0]
+
+    add_assistant(
+        user_id,
+        name
+    )
 
     await message.answer(
-        "☢️ CHO ВТОРОЙ 2.3\n\n"
-        "Telegram: ✅\n"
-        "Groq: ✅\n"
-        f"Модель: {current_model}\n"
-        f"Твоя роль: {get_user_role(message.from_user.id)}\n"
-        f"Приказов: {len(commands)}\n"
-        f"Членов Семьи: {len(family)}"
+        "🛡️ ПОМОЩНИК НАЗНАЧЕН.\n\n"
+        f"🆔 ID: {user_id}\n"
+        f"⭐ Уровень: 90\n\n"
+        "Помощник может управлять локальными "
+        "приказами в чатах."
     )
+
+
+# ============================================================
+# /REMOVEASSISTANT
+# ============================================================
+
+@dp.message(Command("removeassistant"))
+async def removeassistant_command(message: Message):
+
+    if not is_head_of_family(
+        message.from_user.id
+    ):
+
+        await message.answer(
+            "⛔ Только Глава Семьи может "
+            "снимать Помощников."
+        )
+
+        return
+
+    parts = message.text.split()
+
+    if len(parts) < 2:
+
+        await message.answer(
+            "Использование:\n"
+            "/removeassistant ID"
+        )
+
+        return
+
+    try:
+
+        user_id = int(parts[1])
+
+    except ValueError:
+
+        await message.answer(
+            "⚠️ ID должен быть числом."
+        )
+
+        return
+
+    removed = remove_assistant(
+        user_id
+    )
+
+    if removed:
+
+        await message.answer(
+            "🛡️ Помощник снят.\n"
+            f"🆔 ID: {user_id}"
+        )
+
+    else:
+
+        await message.answer(
+            "⚠️ Этот пользователь "
+            "не является Помощником."
+        )
+
+
+# ============================================================
+# /ASSISTANTS
+# ============================================================
+
+@dp.message(Command("assistants"))
+async def assistants_command(message: Message):
+
+    assistants = get_assistants()
+
+    if not assistants:
+
+        await message.answer(
+            "🛡️ Помощников пока нет."
+        )
+
+        return
+
+    text = "🛡️ ПОМОЩНИКИ ГЛАВЫ:\n\n"
+
+    for user_id, name in assistants:
+
+        display_name = name or "Неизвестный"
+
+        text += (
+            f"• {display_name}\n"
+            f"  🆔 {user_id}\n"
+            f"  ⭐ 90\n\n"
+        )
+
+    await message.answer(text)
 
 
 # ============================================================
@@ -724,14 +1190,16 @@ async def commands_command(message: Message):
 
         return
 
-    text = "📜 ГЛОБАЛЬНЫЕ ПРИКАЗЫ:\n\n"
+    text = "🌍 ГЛОБАЛЬНЫЕ ПРИКАЗЫ:\n\n"
 
     for number, (_, command) in enumerate(
         commands,
         start=1
     ):
 
-        text += f"{number}. {command}\n"
+        text += (
+            f"{number}. {command}\n"
+        )
 
     await message.answer(text)
 
@@ -749,7 +1217,7 @@ async def command_handler(message: Message):
 
         await message.answer(
             "⛔ Только Глава Семьи может "
-            "отдавать глобальные приказы."
+            "создавать глобальные приказы."
         )
 
         return
@@ -780,9 +1248,9 @@ async def command_handler(message: Message):
     add_global_command(command)
 
     await message.answer(
-        "👑 ПРИКАЗ ПРИНЯТ.\n\n"
+        "👑 ГЛОБАЛЬНЫЙ ПРИКАЗ ПРИНЯТ.\n\n"
         f"📜 {command}\n\n"
-        "Приказ сохранён глобально."
+        "Он действует во всех чатах."
     )
 
 
@@ -799,7 +1267,7 @@ async def removecommand_command(message: Message):
 
         await message.answer(
             "⛔ Только Глава Семьи может "
-            "удалять приказы."
+            "удалять глобальные приказы."
         )
 
         return
@@ -846,7 +1314,7 @@ async def removecommand_command(message: Message):
     )
 
     await message.answer(
-        "👑 ПРИКАЗ УДАЛЁН.\n\n"
+        "👑 ГЛОБАЛЬНЫЙ ПРИКАЗ УДАЛЁН.\n\n"
         f"📜 {command_text}"
     )
 
@@ -864,7 +1332,7 @@ async def clearcommands_command(message: Message):
 
         await message.answer(
             "⛔ Только Глава Семьи может "
-            "очищать приказы."
+            "очищать глобальные приказы."
         )
 
         return
@@ -873,6 +1341,221 @@ async def clearcommands_command(message: Message):
 
     await message.answer(
         "👑 Все глобальные приказы удалены."
+    )
+
+
+# ============================================================
+# /LOCALCOMMAND
+# ============================================================
+
+@dp.message(Command("localcommand"))
+async def localcommand_command(message: Message):
+
+    user_id = message.from_user.id
+
+    if not can_manage_local(user_id):
+
+        await message.answer(
+            "⛔ У тебя нет полномочий "
+            "для локальных приказов."
+        )
+
+        return
+
+    parts = message.text.split(
+        maxsplit=1
+    )
+
+    if len(parts) < 2:
+
+        await message.answer(
+            "Использование:\n"
+            "/localcommand текст приказа"
+        )
+
+        return
+
+    command = parts[1].strip()
+
+    if len(command) > 1000:
+
+        await message.answer(
+            "⚠️ Приказ слишком длинный."
+        )
+
+        return
+
+    add_local_command(
+        message.chat.id,
+        command
+    )
+
+    await message.answer(
+        "🏠 ЛОКАЛЬНЫЙ ПРИКАЗ ПРИНЯТ.\n\n"
+        f"📜 {command}\n\n"
+        "Он действует только в этом чате."
+    )
+
+
+# ============================================================
+# /LOCALCOMMANDS
+# ============================================================
+
+@dp.message(Command("localcommands"))
+async def localcommands_command(message: Message):
+
+    commands = get_local_commands(
+        message.chat.id
+    )
+
+    if not commands:
+
+        await message.answer(
+            "🏠 В этом чате локальных "
+            "приказов нет."
+        )
+
+        return
+
+    text = "🏠 ЛОКАЛЬНЫЕ ПРИКАЗЫ:\n\n"
+
+    for number, (_, command) in enumerate(
+        commands,
+        start=1
+    ):
+
+        text += (
+            f"{number}. {command}\n"
+        )
+
+    await message.answer(text)
+
+
+# ============================================================
+# /REMOVELOCALCOMMAND
+# ============================================================
+
+@dp.message(Command("removelocalcommand"))
+async def removelocalcommand_command(message: Message):
+
+    user_id = message.from_user.id
+
+    if not can_manage_local(user_id):
+
+        await message.answer(
+            "⛔ У тебя нет полномочий."
+        )
+
+        return
+
+    parts = message.text.split()
+
+    if len(parts) < 2:
+
+        await message.answer(
+            "Использование:\n"
+            "/removelocalcommand номер"
+        )
+
+        return
+
+    try:
+
+        number = int(parts[1])
+
+    except ValueError:
+
+        await message.answer(
+            "⚠️ Укажи номер локального приказа."
+        )
+
+        return
+
+    commands = get_local_commands(
+        message.chat.id
+    )
+
+    if number < 1 or number > len(commands):
+
+        await message.answer(
+            "⚠️ Такого локального приказа нет."
+        )
+
+        return
+
+    command_id, command_text = commands[
+        number - 1
+    ]
+
+    remove_local_command(
+        message.chat.id,
+        command_id
+    )
+
+    await message.answer(
+        "🏠 ЛОКАЛЬНЫЙ ПРИКАЗ УДАЛЁН.\n\n"
+        f"📜 {command_text}"
+    )
+
+
+# ============================================================
+# /CLEARLOCALCOMMANDS
+# ============================================================
+
+@dp.message(Command("clearlocalcommands"))
+async def clearlocalcommands_command(message: Message):
+
+    user_id = message.from_user.id
+
+    if not can_manage_local(user_id):
+
+        await message.answer(
+            "⛔ У тебя нет полномочий."
+        )
+
+        return
+
+    clear_local_commands(
+        message.chat.id
+    )
+
+    await message.answer(
+        "🏠 Все локальные приказы "
+        "этого чата удалены."
+    )
+
+
+# ============================================================
+# /STATUS
+# ============================================================
+
+@dp.message(Command("status"))
+async def status_command(message: Message):
+
+    global_commands = get_global_commands()
+
+    local_commands = get_local_commands(
+        message.chat.id
+    )
+
+    family = get_family()
+
+    assistants = get_assistants()
+
+    role = get_user_role(
+        message.from_user.id
+    )
+
+    await message.answer(
+        "☢️ CHO ВТОРОЙ 2.4\n\n"
+        "Telegram: ✅\n"
+        "Groq: ✅\n"
+        f"Модель: {MODEL or 'не выбрана'}\n\n"
+        f"Твоя роль: {role}\n"
+        f"🌍 Глобальных приказов: {len(global_commands)}\n"
+        f"🏠 Локальных приказов: {len(local_commands)}\n"
+        f"👨‍👩‍👧 Членов Семьи: {len(family)}\n"
+        f"🛡️ Помощников: {len(assistants)}"
     )
 
 
@@ -899,7 +1582,9 @@ async def get_groq_models():
 
         for model_id in available:
 
-            print(f"🤖 {model_id}")
+            print(
+                f"🤖 {model_id}"
+            )
 
         preferred = [
             "openai/gpt-oss-120b",
@@ -965,11 +1650,11 @@ async def test_groq():
             ],
 
             max_tokens=20,
-
             temperature=0
         )
 
         print("✅ GROQ РАБОТАЕТ!")
+
         print(
             f"🤖 {response.choices[0].message.content}"
         )
@@ -979,6 +1664,7 @@ async def test_groq():
     except Exception as error:
 
         print("❌ GROQ НЕ РАБОТАЕТ!")
+
         print(
             f"{type(error).__name__}: {error}"
         )
@@ -992,9 +1678,9 @@ async def test_groq():
 
 async def ask_ai(
     chat_id,
+    user_id,
     text,
-    username,
-    role
+    username
 ):
 
     if not MODEL:
@@ -1003,15 +1689,17 @@ async def ask_ai(
             "Модель Groq не выбрана."
         )
 
-    system_prompt = build_system_prompt()
+    role = get_user_role(user_id)
 
-    user_info = ""
+    system_prompt = build_system_prompt(
+        chat_id,
+        user_id
+    )
 
-    if role:
-
-        user_info += (
-            f"\nРоль пользователя: {role}."
-        )
+    user_info = (
+        f"\nТекущий пользователь: {role}"
+        f"\nУровень: {get_role_level(role)}"
+    )
 
     if username:
 
@@ -1030,12 +1718,10 @@ async def ask_ai(
         chat_history[chat_id]
     )
 
-    messages.append(
-        {
-            "role": "user",
-            "content": text
-        }
-    )
+    messages.append({
+        "role": "user",
+        "content": text
+    })
 
     response = await ai.chat.completions.create(
 
@@ -1072,7 +1758,7 @@ async def ask_ai(
 
 
 # ============================================================
-# ОЧНЫЕ СООБЩЕНИЯ
+# NORMAL MESSAGES
 # ============================================================
 
 @dp.message()
@@ -1081,26 +1767,22 @@ async def normal_message_handler(message: Message):
     if not message.text:
         return
 
-    # Команды не передаём AI
+    # Команды не должны попадать в AI
     if message.text.startswith("/"):
         return
+
+    save_user(message)
 
     if not should_respond(message):
         return
 
     try:
 
-        user_id = message.from_user.id
-
-        username = message.from_user.username
-
-        role = get_user_role(user_id)
-
         answer = await ask_ai(
             message.chat.id,
+            message.from_user.id,
             message.text,
-            username,
-            role
+            message.from_user.username
         )
 
         await message.answer(answer)
@@ -1108,6 +1790,7 @@ async def normal_message_handler(message: Message):
     except Exception as error:
 
         print("❌ Ошибка обработки:")
+
         print(
             f"{type(error).__name__}: {error}"
         )
@@ -1141,27 +1824,42 @@ def run_web_server():
 
 
 # ============================================================
-# BOT
+# TELEGRAM
 # ============================================================
 
 async def run_bot():
 
-    print("☢️ Cho Второй 2.3 запускается...")
+    print(
+        "☢️ Cho Второй 2.4 запускается..."
+    )
 
     try:
 
         me = await bot.get_me()
 
-        print("✅ Telegram подключён")
-        print(f"🤖 @{me.username}")
-        print(f"🆔 Bot ID: {me.id}")
+        print(
+            "✅ Telegram подключён"
+        )
+
+        print(
+            f"🤖 @{me.username}"
+        )
+
+        print(
+            f"🆔 Bot ID: {me.id}"
+        )
 
         await bot.delete_webhook(
             drop_pending_updates=True
         )
 
-        print("✅ Webhook удалён.")
-        print("📡 Polling запущен.")
+        print(
+            "✅ Webhook удалён."
+        )
+
+        print(
+            "📡 Polling запущен."
+        )
 
         await dp.start_polling(
             bot,
@@ -1170,7 +1868,10 @@ async def run_bot():
 
     except Exception as error:
 
-        print("❌ ОШИБКА TELEGRAM:")
+        print(
+            "❌ ОШИБКА TELEGRAM:"
+        )
+
         print(
             f"{type(error).__name__}: {error}"
         )
@@ -1185,9 +1886,15 @@ async def run_bot():
 async def main():
 
     print("")
-    print("========================================")
-    print("☢️ CHO ВТОРОЙ 2.3")
-    print("========================================")
+    print(
+        "========================================"
+    )
+    print(
+        "☢️ CHO ВТОРОЙ 2.4"
+    )
+    print(
+        "========================================"
+    )
 
     init_database()
 
@@ -1196,6 +1903,16 @@ async def main():
     if models_ok:
 
         await test_groq()
+
+    else:
+
+        print(
+            "⚠️ Модели Groq получить не удалось."
+        )
+
+    print(
+        "========================================"
+    )
 
     await asyncio.gather(
 
