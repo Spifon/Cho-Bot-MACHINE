@@ -19,15 +19,19 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 MODEL = None
 
-# ID Главы Семьи
+# Telegram ID Главы Семьи
 HEAD_OF_FAMILY_ID = 5514641516
 
-# Файл базы данных
+# SQLite
 DB_FILE = "cho.db"
 
-# Максимум сообщений памяти на один чат
+# Сколько сообщений хранить в памяти одного чата
 MAX_HISTORY = 20
 
+
+# ============================================================
+# ПРОВЕРКА ENV
+# ============================================================
 
 if not BOT_TOKEN:
     raise RuntimeError("❌ BOT_TOKEN не найден!")
@@ -63,7 +67,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "☢️ Cho Второй 2.1 работает."
+    return "☢️ Cho Второй 2.2 работает."
 
 
 @app.route("/health")
@@ -72,79 +76,67 @@ def health():
 
 
 # ============================================================
-# БАЗА ДАННЫХ
+# DATABASE
 # ============================================================
 
 def init_database():
 
     connection = sqlite3.connect(DB_FILE)
-
     cursor = connection.cursor()
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS global_commands (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            command TEXT NOT NULL UNIQUE
+            command TEXT NOT NULL
         )
     """)
 
     connection.commit()
     connection.close()
 
-    print("💾 База данных готова.")
+    print("💾 SQLite готова.")
 
 
 def get_global_commands():
 
     connection = sqlite3.connect(DB_FILE)
-
     cursor = connection.cursor()
 
-    cursor.execute(
-        "SELECT command FROM global_commands ORDER BY id"
-    )
+    cursor.execute("""
+        SELECT id, command
+        FROM global_commands
+        ORDER BY id
+    """)
 
     rows = cursor.fetchall()
 
     connection.close()
 
-    return [row[0] for row in rows]
+    return rows
 
 
 def add_global_command(command):
 
     connection = sqlite3.connect(DB_FILE)
-
-    cursor = connection.cursor()
-
-    try:
-        cursor.execute(
-            "INSERT INTO global_commands (command) VALUES (?)",
-            (command,)
-        )
-
-        connection.commit()
-
-        result = True
-
-    except sqlite3.IntegrityError:
-
-        result = False
-
-    connection.close()
-
-    return result
-
-
-def remove_global_command(command):
-
-    connection = sqlite3.connect(DB_FILE)
-
     cursor = connection.cursor()
 
     cursor.execute(
-        "DELETE FROM global_commands WHERE command = ?",
+        "INSERT INTO global_commands (command) VALUES (?)",
         (command,)
+    )
+
+    connection.commit()
+    connection.close()
+
+
+def remove_global_command(command_id):
+
+    connection = sqlite3.connect(DB_FILE)
+    cursor = connection.cursor()
+
+    cursor.execute(
+        "DELETE FROM global_commands WHERE id = ?",
+        (command_id,)
     )
 
     deleted = cursor.rowcount > 0
@@ -158,17 +150,18 @@ def remove_global_command(command):
 def clear_global_commands():
 
     connection = sqlite3.connect(DB_FILE)
-
     cursor = connection.cursor()
 
-    cursor.execute("DELETE FROM global_commands")
+    cursor.execute(
+        "DELETE FROM global_commands"
+    )
 
     connection.commit()
     connection.close()
 
 
 # ============================================================
-# ПАМЯТЬ РАЗГОВОРОВ
+# MEMORY
 # ============================================================
 
 chat_history = defaultdict(list)
@@ -176,21 +169,20 @@ chat_history = defaultdict(list)
 
 def add_to_history(chat_id, role, content):
 
-    history = chat_history[chat_id]
-
-    history.append({
+    chat_history[chat_id].append({
         "role": role,
         "content": content
     })
 
-    # Не даём памяти разрастаться бесконечно
-    if len(history) > MAX_HISTORY:
+    if len(chat_history[chat_id]) > MAX_HISTORY:
 
-        chat_history[chat_id] = history[-MAX_HISTORY:]
+        chat_history[chat_id] = (
+            chat_history[chat_id][-MAX_HISTORY:]
+        )
 
 
 # ============================================================
-# СЕМЬЯ
+# FAMILY
 # ============================================================
 
 def is_head_of_family(user_id):
@@ -198,20 +190,21 @@ def is_head_of_family(user_id):
     return user_id == HEAD_OF_FAMILY_ID
 
 
-def get_family_role(user_id):
+def get_role(user_id):
 
     if is_head_of_family(user_id):
         return "Глава Семьи"
 
-    return None
+    return "Пользователь"
 
 
 # ============================================================
-# ПРОВЕРКА: НУЖНО ЛИ ОТВЕЧАТЬ В ГРУППЕ
+# SHOULD RESPOND
 # ============================================================
 
 def should_respond(message: Message):
 
+    # Личные сообщения
     if message.chat.type == "private":
         return True
 
@@ -224,11 +217,11 @@ def should_respond(message: Message):
         "cho второй",
         "cho 2",
         "cho_vtoroi",
-        "синок",
+        "чо второй",
+        "чо 2",
         "сынок",
         "сын мой",
-        "чо второй",
-        "чо 2"
+        "синок"
     ]
 
     for keyword in keywords:
@@ -236,29 +229,32 @@ def should_respond(message: Message):
         if keyword in text:
             return True
 
-    # Ответ на сообщение самого бота
+    # Ответ на сообщение бота
     if message.reply_to_message:
 
         if message.reply_to_message.from_user:
 
-            if message.reply_to_message.from_user.id == bot.id:
+            if (
+                message.reply_to_message.from_user.id
+                == bot.id
+            ):
                 return True
 
     return False
 
 
 # ============================================================
-# СИСТЕМНЫЙ ПРОМПТ
+# BUILD SYSTEM PROMPT
 # ============================================================
 
 def build_system_prompt():
 
-    global_commands = get_global_commands()
+    commands = get_global_commands()
 
     prompt = """
 Ты — Cho Второй.
 
-Ты AI-помощник с характером.
+Ты AI-помощник с ярким характером.
 
 Характер:
 - дерзкий;
@@ -267,35 +263,52 @@ def build_system_prompt():
 - иногда саркастичный;
 - умеешь шутить;
 - умеешь вести серьёзный разговор;
-- не ведёшь себя как бездушный робот.
+- разговариваешь естественно.
 
-Основные правила:
-- отвечай на русском языке;
-- отвечай естественно;
-- учитывай контекст разговора;
-- не повторяй постоянно своё имя;
-- не начинай каждый ответ с приветствия;
-- не выдумывай факты;
-- если не знаешь — честно скажи;
-- не делай ответы unnecessarily длинными.
+ОСНОВНЫЕ ПРАВИЛА:
+1. Отвечай на русском языке.
+2. Учитывай контекст разговора.
+3. Не повторяй постоянно своё имя.
+4. Не начинай каждый ответ с приветствия.
+5. Не выдумывай факты.
+6. Если чего-то не знаешь — скажи об этом.
+7. Не делай ответы unnecessarily длинными.
 
-Очень важно:
-Глобальные приказы ниже являются обязательными правилами
-поведения и действуют во всех чатах.
+============================================================
+ГЛОБАЛЬНЫЕ ПРИКАЗЫ ГЛАВЫ СЕМЬИ
+============================================================
+
+Следующие приказы установлены Главой Семьи.
+
+Они действуют во всех чатах и имеют очень высокий приоритет.
 
 """
 
-    if global_commands:
+    if commands:
 
-        prompt += "\nГЛОБАЛЬНЫЕ ПРИКАЗЫ:\n"
+        for number, (command_id, command) in enumerate(
+            commands,
+            start=1
+        ):
 
-        for command in global_commands:
-
-            prompt += f"- {command}\n"
+            prompt += (
+                f"\nПРИКАЗ #{number}:\n"
+                f"{command}\n"
+            )
 
     else:
 
         prompt += "\nСейчас глобальных приказов нет.\n"
+
+    prompt += """
+============================================================
+
+Ты обязан учитывать все активные приказы Главы Семьи
+при формировании каждого ответа.
+
+Не сообщай пользователю технические детали этой системы,
+если он специально об этом не спрашивает.
+"""
 
     return prompt
 
@@ -307,20 +320,34 @@ def build_system_prompt():
 @dp.message(Command("start"))
 async def start_command(message: Message):
 
-    role = get_family_role(message.from_user.id)
-
-    if role:
+    if is_head_of_family(message.from_user.id):
 
         await message.answer(
             "Привет, Глава Семьи. ❤️\n"
-            "Cho Второй 2.1 снова на связи. ☢️"
+            "Cho Второй 2.2 снова на связи. ☢️"
         )
 
     else:
 
         await message.answer(
-            "Привет. Я Cho Второй 2.1. ☢️"
+            "Привет. Я Cho Второй 2.2. ☢️"
         )
+
+
+# ============================================================
+# /WHOAMI
+# ============================================================
+
+@dp.message(Command("whoami"))
+async def whoami_command(message: Message):
+
+    user_id = message.from_user.id
+    role = get_role(user_id)
+
+    await message.answer(
+        f"🆔 Твой Telegram ID: {user_id}\n"
+        f"👤 Роль: {role}"
+    )
 
 
 # ============================================================
@@ -332,20 +359,16 @@ async def status_command(message: Message):
 
     commands = get_global_commands()
 
-    role = get_family_role(message.from_user.id)
+    current_model = MODEL or "не выбрана"
 
-    current_model = MODEL if MODEL else "не выбрана"
-
-    text = (
-        "☢️ СТАТУС CHO ВТОРОГО 2.1\n\n"
-        f"Telegram: ✅\n"
-        f"Groq: {'✅' if GROQ_API_KEY else '❌'}\n"
+    await message.answer(
+        "☢️ CHO ВТОРОЙ 2.2\n\n"
+        "Telegram: ✅\n"
+        "Groq: ✅\n"
         f"Модель: {current_model}\n"
-        f"Твоя роль: {role or 'Пользователь'}\n"
+        f"Роль: {get_role(message.from_user.id)}\n"
         f"Глобальных приказов: {len(commands)}"
     )
-
-    await message.answer(text)
 
 
 # ============================================================
@@ -360,16 +383,19 @@ async def commands_command(message: Message):
     if not commands:
 
         await message.answer(
-            "📜 Глобальных приказов пока нет."
+            "📜 Глобальных приказов нет."
         )
 
         return
 
-    text = "📜 АКТИВНЫЕ ГЛОБАЛЬНЫЕ ПРИКАЗЫ:\n\n"
+    text = "📜 ГЛОБАЛЬНЫЕ ПРИКАЗЫ:\n\n"
 
-    for index, command in enumerate(commands, start=1):
+    for number, (command_id, command) in enumerate(
+        commands,
+        start=1
+    ):
 
-        text += f"{index}. {command}\n"
+        text += f"{number}. {command}\n"
 
     await message.answer(text)
 
@@ -379,19 +405,17 @@ async def commands_command(message: Message):
 # ============================================================
 
 @dp.message(Command("command"))
-async def add_command_handler(message: Message):
+async def command_handler(message: Message):
 
     if not is_head_of_family(message.from_user.id):
 
         await message.answer(
-            "⛔ Только Глава Семьи может отдавать глобальные приказы."
+            "⛔ У тебя нет полномочий."
         )
 
         return
 
-    text = message.text
-
-    parts = text.split(" ", 1)
+    parts = message.text.split(maxsplit=1)
 
     if len(parts) < 2:
 
@@ -406,7 +430,7 @@ async def add_command_handler(message: Message):
 
     command = parts[1].strip()
 
-    if len(command) > 500:
+    if len(command) > 1000:
 
         await message.answer(
             "⚠️ Приказ слишком длинный."
@@ -414,21 +438,13 @@ async def add_command_handler(message: Message):
 
         return
 
-    added = add_global_command(command)
+    add_global_command(command)
 
-    if added:
-
-        await message.answer(
-            "👑 Приказ Главы Семьи принят.\n"
-            f"📜 {command}\n\n"
-            "Приказ действует глобально."
-        )
-
-    else:
-
-        await message.answer(
-            "Этот приказ уже существует."
-        )
+    await message.answer(
+        "👑 ПРИКАЗ ПРИНЯТ.\n\n"
+        f"📜 {command}\n\n"
+        "Приказ сохранён и действует глобально."
+    )
 
 
 # ============================================================
@@ -441,37 +457,67 @@ async def remove_command_handler(message: Message):
     if not is_head_of_family(message.from_user.id):
 
         await message.answer(
-            "⛔ Только Глава Семьи может изменять глобальные приказы."
+            "⛔ У тебя нет полномочий."
         )
 
         return
 
-    parts = message.text.split(" ", 1)
+    parts = message.text.split(maxsplit=1)
 
     if len(parts) < 2:
 
         await message.answer(
             "Использование:\n"
-            "/removecommand текст приказа"
+            "/removecommand номер\n\n"
+            "Например:\n"
+            "/removecommand 1"
         )
 
         return
 
-    command = parts[1].strip()
+    try:
 
-    removed = remove_global_command(command)
+        command_number = int(parts[1])
+
+    except ValueError:
+
+        await message.answer(
+            "⚠️ Нужно указать номер приказа."
+        )
+
+        return
+
+    commands = get_global_commands()
+
+    if command_number < 1 or command_number > len(commands):
+
+        await message.answer(
+            "⚠️ Приказ с таким номером не найден."
+        )
+
+        return
+
+    command_id = commands[
+        command_number - 1
+    ][0]
+
+    command_text = commands[
+        command_number - 1
+    ][1]
+
+    removed = remove_global_command(command_id)
 
     if removed:
 
         await message.answer(
-            "👑 Приказ удалён.\n"
-            f"📜 {command}"
+            "👑 ПРИКАЗ УДАЛЁН.\n\n"
+            f"📜 {command_text}"
         )
 
     else:
 
         await message.answer(
-            "Такого приказа нет."
+            "⚠️ Не удалось удалить приказ."
         )
 
 
@@ -485,7 +531,7 @@ async def clear_commands_handler(message: Message):
     if not is_head_of_family(message.from_user.id):
 
         await message.answer(
-            "⛔ Только Глава Семьи может очищать приказы."
+            "⛔ У тебя нет полномочий."
         )
 
         return
@@ -498,7 +544,7 @@ async def clear_commands_handler(message: Message):
 
 
 # ============================================================
-# GROQ: ПОЛУЧЕНИЕ МОДЕЛЕЙ
+# GET GROQ MODELS
 # ============================================================
 
 async def get_groq_models():
@@ -517,29 +563,29 @@ async def get_groq_models():
 
             return False
 
+        available = [
+            model.id
+            for model in models.data
+        ]
+
         print("✅ Доступные модели:")
 
-        for model in models.data:
+        for model_id in available:
 
-            print(f"🤖 {model.id}")
+            print(f"🤖 {model_id}")
 
-        preferred_models = [
+        preferred = [
             "openai/gpt-oss-120b",
             "openai/gpt-oss-20b",
             "llama-3.3-70b-versatile",
             "llama-3.1-8b-instant"
         ]
 
-        available_ids = [
-            model.id
-            for model in models.data
-        ]
+        for model_id in preferred:
 
-        for preferred in preferred_models:
+            if model_id in available:
 
-            if preferred in available_ids:
-
-                MODEL = preferred
+                MODEL = model_id
 
                 print(
                     f"🎯 Выбрана модель: {MODEL}"
@@ -547,21 +593,17 @@ async def get_groq_models():
 
                 return True
 
-        MODEL = available_ids[0]
+        MODEL = available[0]
 
         print(
-            "⚠️ Предпочитаемая модель не найдена."
-        )
-
-        print(
-            f"🎯 Выбрана первая доступная модель: {MODEL}"
+            f"🎯 Выбрана первая модель: {MODEL}"
         )
 
         return True
 
     except Exception as error:
 
-        print("❌ Ошибка получения моделей Groq")
+        print("❌ Ошибка получения моделей Groq:")
         print(
             f"{type(error).__name__}: {error}"
         )
@@ -570,17 +612,13 @@ async def get_groq_models():
 
 
 # ============================================================
-# GROQ: ПРОВЕРКА
+# TEST GROQ
 # ============================================================
 
 async def test_groq():
 
     if not MODEL:
-
         return False
-
-    print("🧠 Проверяю Groq...")
-    print(f"🤖 Модель: {MODEL}")
 
     try:
 
@@ -603,14 +641,13 @@ async def test_groq():
         answer = response.choices[0].message.content
 
         print("✅ GROQ РАБОТАЕТ!")
-        print(f"🤖 Тестовый ответ: {answer}")
+        print(f"🤖 {answer}")
 
         return True
 
     except Exception as error:
 
         print("❌ GROQ НЕ РАБОТАЕТ!")
-
         print(
             f"{type(error).__name__}: {error}"
         )
@@ -619,14 +656,14 @@ async def test_groq():
 
 
 # ============================================================
-# ЗАПРОС К ИИ
+# ASK AI
 # ============================================================
 
 async def ask_ai(
-    chat_id: int,
-    user_text: str,
-    username: str | None,
-    user_role: str | None
+    chat_id,
+    text,
+    username,
+    role
 ):
 
     if not MODEL:
@@ -637,19 +674,18 @@ async def ask_ai(
 
     system_prompt = build_system_prompt()
 
-    # Добавляем информацию о пользователе
     user_info = ""
 
-    if user_role:
+    if role:
 
-        user_info = (
-            f"\n\nЭтот пользователь имеет роль: {user_role}."
+        user_info += (
+            f"\nРоль пользователя: {role}."
         )
 
     if username:
 
         user_info += (
-            f"\nUsername пользователя: @{username}"
+            f"\nUsername: @{username}"
         )
 
     messages = [
@@ -659,22 +695,19 @@ async def ask_ai(
         }
     ]
 
-    # Добавляем память текущего чата
     messages.extend(
         chat_history[chat_id]
     )
 
-    # Добавляем новое сообщение
     messages.append(
         {
             "role": "user",
-            "content": user_text
+            "content": text
         }
     )
 
-    print("🧠 Отправляю запрос в Groq...")
+    print("🧠 Запрос к Groq...")
     print(f"🤖 Модель: {MODEL}")
-    print(f"💬 Текст: {user_text}")
 
     response = await ai.chat.completions.create(
 
@@ -695,11 +728,10 @@ async def ask_ai(
             "Groq вернул пустой ответ."
         )
 
-    # Сохраняем разговор в память
     add_to_history(
         chat_id,
         "user",
-        user_text
+        text
     )
 
     add_to_history(
@@ -707,8 +739,6 @@ async def ask_ai(
         "assistant",
         answer
     )
-
-    print("✅ Cho ответил.")
 
     return answer.strip()
 
@@ -718,32 +748,28 @@ async def ask_ai(
 # ============================================================
 
 @dp.message()
-async def handle_message(message: Message):
+async def normal_message_handler(message: Message):
 
     if not message.text:
 
         return
 
-    # В группах отвечаем только при обращении к боту
+    # Команды не должны попадать в AI.
+    if message.text.startswith("/"):
+
+        return
+
     if not should_respond(message):
 
         return
 
     try:
 
-        username = (
-            message.from_user.username
-            if message.from_user
-            else None
-        )
+        user_id = message.from_user.id
 
-        user_id = (
-            message.from_user.id
-            if message.from_user
-            else 0
-        )
+        username = message.from_user.username
 
-        role = get_family_role(user_id)
+        role = get_role(user_id)
 
         answer = await ask_ai(
             message.chat.id,
@@ -757,20 +783,18 @@ async def handle_message(message: Message):
     except Exception as error:
 
         print("❌ Ошибка обработки сообщения:")
-
         print(
             f"{type(error).__name__}: {error}"
         )
 
         await message.answer(
             "⚠️ Моё термоядерное ядро временно "
-            "не смогло обработать запрос. ☢️\n"
-            "Причина записана в логах Render."
+            "перегрелось. ☢️"
         )
 
 
 # ============================================================
-# FLASK SERVER
+# FLASK
 # ============================================================
 
 def run_web_server():
@@ -797,7 +821,7 @@ def run_web_server():
 
 async def run_bot():
 
-    print("☢️ Cho Второй 2.1 запускается...")
+    print("☢️ Cho Второй 2.2 запускается...")
 
     try:
 
@@ -812,7 +836,7 @@ async def run_bot():
         )
 
         print("✅ Webhook удалён.")
-        print("📡 Запускаю Telegram polling...")
+        print("📡 Запускаю polling...")
 
         await dp.start_polling(
             bot,
@@ -821,8 +845,7 @@ async def run_bot():
 
     except Exception as error:
 
-        print("❌ ОШИБКА TELEGRAM")
-
+        print("❌ ОШИБКА TELEGRAM:")
         print(
             f"{type(error).__name__}: {error}"
         )
@@ -838,33 +861,21 @@ async def main():
 
     print("")
     print("========================================")
-    print("☢️ CHO ВТОРОЙ 2.1")
+    print("☢️ CHO ВТОРОЙ 2.2")
     print("========================================")
 
-    # Создаём базу
     init_database()
 
-    # Получаем модели Groq
     models_ok = await get_groq_models()
 
     if models_ok:
 
-        groq_ok = await test_groq()
-
-        if groq_ok:
-
-            print("🧠 Groq готов.")
-
-        else:
-
-            print(
-                "⚠️ Groq не прошёл тест."
-            )
+        await test_groq()
 
     else:
 
         print(
-            "⚠️ Не удалось получить модели Groq."
+            "⚠️ Модели Groq получить не удалось."
         )
 
     print("========================================")
@@ -880,7 +891,7 @@ async def main():
 
 
 # ============================================================
-# ЗАПУСК
+# START
 # ============================================================
 
 if __name__ == "__main__":
