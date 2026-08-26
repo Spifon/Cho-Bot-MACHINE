@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import os
 from threading import Thread
 
 from flask import Flask, jsonify
@@ -10,6 +9,7 @@ from aiogram.filters import Command
 from aiogram.types import Message
 
 from config import BOT_TOKEN, GROQ_API_KEY, GROQ_MODEL, PORT
+from ai.groq import ask_groq
 
 
 # ============================================================
@@ -62,7 +62,7 @@ dp = Dispatcher()
 
 
 # ============================================================
-# START
+# /START
 # ============================================================
 
 @dp.message(Command("start"))
@@ -74,7 +74,7 @@ async def start_command(message: Message):
 
 
 # ============================================================
-# HELP / COMMANDS
+# /COMMANDS / /HELP / /?
 # ============================================================
 
 @dp.message(Command("commands"))
@@ -93,18 +93,65 @@ async def commands_command(message: Message):
 
 
 # ============================================================
-# HEALTH
+# /HEALTH
 # ============================================================
 
 @dp.message(Command("health"))
 async def health_command(message: Message):
     await message.answer(
-        "☢️ Система работает.\n"
+        "☢️ Система работает.\n\n"
         "Telegram: ✅\n"
         "Render: ✅\n"
-        "AI: подготовка\n"
-        "База данных: подготовка"
+        f"AI: {'✅' if GROQ_API_KEY else '❌'}\n"
+        f"Модель: {GROQ_MODEL}\n"
+        "База данных: ⏳"
     )
+
+
+# ============================================================
+# AI — ОБЫЧНЫЕ СООБЩЕНИЯ
+# ============================================================
+
+@dp.message()
+async def ai_message(message: Message):
+
+    # Игнорируем сообщения без текста
+    if not message.text:
+        return
+
+    try:
+        logger.info(
+            "💬 Сообщение от %s: %s",
+            message.from_user.id if message.from_user else "unknown",
+            message.text
+        )
+
+        # Groq синхронный, поэтому запускаем его
+        # в отдельном потоке, чтобы не блокировать Telegram.
+        answer = await asyncio.to_thread(
+            ask_groq,
+            message.text
+        )
+
+        # Защита от пустого ответа
+        if not answer or not answer.strip():
+            logger.warning("⚠️ AI вернул пустой ответ.")
+            return
+
+        await message.answer(answer)
+
+    except Exception as e:
+
+        logger.error(
+            "❌ AI ERROR: %s",
+            e,
+            exc_info=True
+        )
+
+        # Не отправляем пустое сообщение в Telegram.
+        await message.answer(
+            "☢️ Блядь... моё термоядерное ядро временно перегрелось."
+        )
 
 
 # ============================================================
@@ -112,30 +159,54 @@ async def health_command(message: Message):
 # ============================================================
 
 async def main():
+
+    # Проверяем Telegram-токен
     if not BOT_TOKEN:
         raise RuntimeError(
             "❌ BOT_TOKEN не найден в Environment Variables."
         )
 
+    # Проверяем Groq
     if not GROQ_API_KEY:
         logger.warning(
-            "⚠️ GROQ_API_KEY пока не установлен."
+            "⚠️ GROQ_API_KEY не найден."
         )
 
-    logger.info("☢️ Cho Второй 4.0 запускается...")
-    logger.info("🎯 Модель: %s", GROQ_MODEL)
+    logger.info(
+        "☢️ Cho Второй 4.0 запускается..."
+    )
 
-    # Удаляем старый webhook,
-    # чтобы polling не конфликтовал с ним.
-    await bot.delete_webhook(drop_pending_updates=True)
+    logger.info(
+        "🎯 Выбрана модель: %s",
+        GROQ_MODEL
+    )
 
-    logger.info("✅ Webhook очищен.")
-    logger.info("🤖 Telegram polling запускается...")
+    # Удаляем webhook и старые ожидающие обновления.
+    # Это предотвращает часть конфликтов между webhook/polling.
+    await bot.delete_webhook(
+        drop_pending_updates=True
+    )
 
+    logger.info(
+        "✅ Webhook очищен."
+    )
+
+    logger.info(
+        "🤖 Telegram polling запускается..."
+    )
+
+    # Запускаем получение сообщений
     await dp.start_polling(bot)
 
 
+# ============================================================
+# START PROGRAM
+# ============================================================
+
 def start():
+
+    # Flask запускается отдельно,
+    # чтобы Render видел работающий Web Service.
     web_thread = Thread(
         target=run_web_server,
         daemon=True
@@ -143,6 +214,7 @@ def start():
 
     web_thread.start()
 
+    # Запускаем Telegram-бота
     asyncio.run(main())
 
 
