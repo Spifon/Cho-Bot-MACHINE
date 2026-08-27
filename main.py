@@ -168,8 +168,26 @@ async def init_database():
                 user_id BIGINT PRIMARY KEY,
                 username TEXT,
                 first_name TEXT,
+                role TEXT DEFAULT 'Пользователь',
+                level INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
+            """
+        )
+
+        # Добавляем новые поля,
+        # если таблица была создана старой версией.
+        await connection.execute(
+            """
+            ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'Пользователь'
+            """
+        )
+
+        await connection.execute(
+            """
+            ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS level INTEGER DEFAULT 0
             """
         )
 
@@ -209,6 +227,26 @@ async def save_user(message: Message):
         )
 
 
+async def get_user(user_id: int):
+
+    async with db_pool.acquire() as connection:
+
+        return await connection.fetchrow(
+            """
+            SELECT
+                user_id,
+                username,
+                first_name,
+                role,
+                level,
+                created_at
+            FROM users
+            WHERE user_id = $1
+            """,
+            user_id
+        )
+
+
 # ============================================================
 # TELEGRAM
 # ============================================================
@@ -228,11 +266,12 @@ dp = Dispatcher()
 async def start_command(message: Message):
 
     try:
+
         await save_user(message)
 
         await message.answer(
             "☢️ Cho Второй 4.0 запущен.\n\n"
-            "🗄️ Твоя информация сохранена в системе."
+            "👤 Твой профиль создан."
         )
 
     except Exception as error:
@@ -249,6 +288,108 @@ async def start_command(message: Message):
 
 
 # ============================================================
+# /WHOAMI
+# ============================================================
+
+@dp.message(Command("whoami"))
+async def whoami_command(message: Message):
+
+    try:
+
+        await save_user(message)
+
+        user = await get_user(
+            message.from_user.id
+        )
+
+        if not user:
+            await message.answer(
+                "❌ Профиль не найден."
+            )
+            return
+
+        username = (
+            f"@{user['username']}"
+            if user["username"]
+            else "Без username"
+        )
+
+        await message.answer(
+            "👤 ТВОЙ ПРОФИЛЬ\n\n"
+            f"🆔 ID: {user['user_id']}\n"
+            f"👤 Имя: {user['first_name']}\n"
+            f"🔗 Username: {username}\n"
+            f"🎭 Роль: {user['role']}\n"
+            f"⭐ Уровень: {user['level']}"
+        )
+
+    except Exception as error:
+
+        logger.error(
+            "❌ PROFILE ERROR: %s",
+            error,
+            exc_info=True
+        )
+
+        await message.answer(
+            "❌ Не удалось загрузить профиль."
+        )
+
+
+# ============================================================
+# /PROFILE
+# ============================================================
+
+@dp.message(Command("profile"))
+async def profile_command(message: Message):
+
+    await whoami_command(message)
+
+
+# ============================================================
+# /STATS
+# ============================================================
+
+@dp.message(Command("stats"))
+async def stats_command(message: Message):
+
+    try:
+
+        await save_user(message)
+
+        user = await get_user(
+            message.from_user.id
+        )
+
+        if not user:
+            await message.answer(
+                "❌ Профиль не найден."
+            )
+            return
+
+        await message.answer(
+            "📊 ТВОЯ СТАТИСТИКА\n\n"
+            f"⭐ Уровень: {user['level']}\n"
+            f"🎭 Роль: {user['role']}\n"
+            "🎮 Игр сыграно: 0\n"
+            "🏆 Побед: 0\n"
+            "💬 Сообщений: пока не считаем"
+        )
+
+    except Exception as error:
+
+        logger.error(
+            "❌ STATS ERROR: %s",
+            error,
+            exc_info=True
+        )
+
+        await message.answer(
+            "❌ Не удалось загрузить статистику."
+        )
+
+
+# ============================================================
 # COMMANDS
 # ============================================================
 
@@ -259,12 +400,19 @@ async def commands_command(message: Message):
 
     await message.answer(
         "☢️ CHO ВТОРОЙ 4.0\n\n"
-        "Основные команды:\n\n"
+
+        "👤 ПРОФИЛЬ\n"
+        "/whoami — информация о тебе\n"
+        "/profile — твой профиль\n"
+        "/stats — статистика\n\n"
+
+        "⚙️ ОСНОВНЫЕ\n"
         "/start — запустить бота\n"
         "/commands — список команд\n"
         "/help — помощь\n"
         "/? — список команд\n"
         "/health — состояние системы\n\n"
+
         "🎮 Игры и другие системы появятся позже."
     )
 
