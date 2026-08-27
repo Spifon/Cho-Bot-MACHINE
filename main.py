@@ -2,6 +2,8 @@ import asyncio
 import logging
 from threading import Thread
 
+import asyncpg
+
 from flask import Flask, jsonify
 from groq import Groq
 
@@ -9,7 +11,13 @@ from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
 from aiogram.types import Message
 
-from config import BOT_TOKEN, GROQ_API_KEY, GROQ_MODEL, PORT
+from config import (
+    BOT_TOKEN,
+    GROQ_API_KEY,
+    GROQ_MODEL,
+    PORT,
+    DATABASE_URL
+)
 
 
 # ============================================================
@@ -40,7 +48,8 @@ def home():
 def health():
     return jsonify({
         "status": "ok",
-        "bot": "Cho Второй 4.0"
+        "bot": "Cho Второй 4.0",
+        "database": "connected" if db_pool else "not_connected"
     })
 
 
@@ -54,17 +63,22 @@ def run_web_server():
 
 
 # ============================================================
-# CHECK ENVIRONMENT
+# ENVIRONMENT
 # ============================================================
 
 if not BOT_TOKEN:
     raise RuntimeError(
-        "❌ BOT_TOKEN не найден в Environment Variables."
+        "❌ BOT_TOKEN не найден."
     )
 
 if not GROQ_API_KEY:
     raise RuntimeError(
-        "❌ GROQ_API_KEY не найден в Environment Variables."
+        "❌ GROQ_API_KEY не найден."
+    )
+
+if not DATABASE_URL:
+    raise RuntimeError(
+        "❌ DATABASE_URL не найден."
     )
 
 
@@ -126,6 +140,76 @@ def ask_groq(user_text: str) -> str:
 
 
 # ============================================================
+# DATABASE
+# ============================================================
+
+db_pool = None
+
+
+async def init_database():
+
+    global db_pool
+
+    logger.info(
+        "🗄️ Подключение к PostgreSQL..."
+    )
+
+    db_pool = await asyncpg.create_pool(
+        DATABASE_URL,
+        min_size=1,
+        max_size=5
+    )
+
+    async with db_pool.acquire() as connection:
+
+        await connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+    logger.info(
+        "✅ PostgreSQL подключён."
+    )
+
+    logger.info(
+        "✅ Таблица users готова."
+    )
+
+
+async def save_user(message: Message):
+
+    if not message.from_user:
+        return
+
+    async with db_pool.acquire() as connection:
+
+        await connection.execute(
+            """
+            INSERT INTO users (
+                user_id,
+                username,
+                first_name
+            )
+            VALUES ($1, $2, $3)
+
+            ON CONFLICT (user_id)
+            DO UPDATE SET
+                username = EXCLUDED.username,
+                first_name = EXCLUDED.first_name
+            """,
+            message.from_user.id,
+            message.from_user.username,
+            message.from_user.first_name
+        )
+
+
+# ============================================================
 # TELEGRAM
 # ============================================================
 
@@ -143,10 +227,25 @@ dp = Dispatcher()
 @dp.message(Command("start"))
 async def start_command(message: Message):
 
-    await message.answer(
-        "☢️ Cho Второй 4.0 запущен.\n\n"
-        "Новая система постепенно активируется."
-    )
+    try:
+        await save_user(message)
+
+        await message.answer(
+            "☢️ Cho Второй 4.0 запущен.\n\n"
+            "🗄️ Твоя информация сохранена в системе."
+        )
+
+    except Exception as error:
+
+        logger.error(
+            "❌ DATABASE ERROR: %s",
+            error,
+            exc_info=True
+        )
+
+        await message.answer(
+            "☢️ Бот работает, но база данных временно недоступна."
+        )
 
 
 # ============================================================
@@ -177,13 +276,20 @@ async def commands_command(message: Message):
 @dp.message(Command("health"))
 async def health_command(message: Message):
 
+    database_status = (
+        "✅"
+        if db_pool
+        else
+        "❌"
+    )
+
     await message.answer(
         "☢️ СИСТЕМА CHO ВТОРОГО\n\n"
         "Telegram: ✅\n"
         "Render: ✅\n"
-        f"Groq: ✅\n"
+        "Groq: ✅\n"
         f"Модель: {GROQ_MODEL}\n"
-        "Database: ⏳"
+        f"PostgreSQL: {database_status}"
     )
 
 
@@ -194,11 +300,12 @@ async def health_command(message: Message):
 @dp.message()
 async def ai_message(message: Message):
 
-    # Игнорируем сообщения без текста
     if not message.text:
         return
 
     try:
+
+        await save_user(message)
 
         logger.info(
             "💬 Сообщение от %s: %s",
@@ -213,7 +320,6 @@ async def ai_message(message: Message):
             message.text
         )
 
-        # Telegram не принимает пустой текст
         if not answer:
 
             logger.warning(
@@ -233,7 +339,7 @@ async def ai_message(message: Message):
     except Exception as error:
 
         logger.error(
-            "❌ GROQ ERROR: %s",
+            "❌ ERROR: %s",
             error,
             exc_info=True
         )
@@ -258,8 +364,8 @@ async def main():
         GROQ_MODEL
     )
 
-    # Удаляем webhook.
-    # Используем polling.
+    await init_database()
+
     await bot.delete_webhook(
         drop_pending_updates=True
     )
