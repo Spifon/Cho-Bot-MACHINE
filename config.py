@@ -10,10 +10,14 @@ GROQ_MODEL = os.getenv(
     "openai/gpt-oss-120b"
 )
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL"
-)
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 PORT = int(
     os.getenv("PORT", "10000")
 )
+
+# ============================================================
+# ВЛАДЕЛЕЦ CHO ВТОРОГО
+# ============================================================
+
+OWNER_ID = 5514641516
